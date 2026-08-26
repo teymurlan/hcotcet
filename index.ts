@@ -40,12 +40,14 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-    if (request.method === "POST" && url.pathname === "/webhook") {
-      const secret = request.headers.get("x-telegram-bot-api-secret-token");
-      if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
+        if (request.method === "POST" && url.pathname === "/webhook") {
+      let update: TgUpdate;
+      try {
+        update = await request.json();
+      } catch {
+        return new Response("bad request", { status: 400 });
       }
-
+      ...
       let update: TgUpdate;
       try {
         update = await request.json();

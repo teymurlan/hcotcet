@@ -71,6 +71,38 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
+    if (request.method === "GET" && url.pathname === "/debug-token") {
+      const token = env.TELEGRAM_BOT_TOKEN ?? "";
+      const tokenPattern = /^\d{6,12}:[A-Za-z0-9_-]{20,}$/;
+
+      let telegramStatus = 0;
+      let telegramOk = false;
+      let telegramBody = "";
+
+      if (token) {
+        const response = await fetch(`${API_BASE}${token}/getMe`);
+        telegramStatus = response.status;
+        telegramBody = await response.text();
+        try {
+          telegramOk = JSON.parse(telegramBody)?.ok === true;
+        } catch {
+          telegramOk = false;
+        }
+      }
+
+      return new Response(
+        JSON.stringify({
+          token_present: Boolean(token),
+          token_length: token.length,
+          token_format_valid: tokenPattern.test(token),
+          telegram_status: telegramStatus,
+          telegram_ok: telegramOk,
+          telegram_error: telegramOk ? null : telegramBody.slice(0, 300),
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
     if (request.method === "GET" && url.pathname === "/debug-send") {
       const chatId = Number(url.searchParams.get("chat_id"));
       if (!Number.isSafeInteger(chatId) || chatId <= 0) {

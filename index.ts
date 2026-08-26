@@ -156,14 +156,7 @@ export default {
       return new Response(JSON.stringify({ match: candidate === expected, expected_length: expected.length, candidate_length: candidate.length }), { headers: { "content-type": "application/json" } });
     }
     if (request.method === "POST" && url.pathname === "/webhook") {
-      let update: TgUpdate;
-      try { update = await request.json(); } catch { return new Response("bad request", { status: 400 }); }
-      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
-      try {
-        if (update.message) await handleMessage(env, tg, update.message);
-        else if (update.callback_query) await handleCallback(env, tg, update.callback_query);
-      } catch (err) { console.error("Error handling update", err); }
-      return new Response("ok", { status: 200 });
+      return new Response("WEBHOOK_DIAGNOSTIC", { status: 418 });
     }
     return new Response("not found", { status: 404 });
   },
@@ -173,18 +166,14 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
   if (!msg.from) return;
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
-
   if (text === "/start") {
     await tg.sendMessage(chatId, "ТЕСТ: Worker получил /start. Telegram и токен работают.");
     try { await resetSession(env.DB, chatId); } catch (err) { console.error("D1 resetSession failed", err); }
     return;
   }
-
   const employeeId = await ensureEmployee(env.DB, msg.from);
   const session = await getSession(env.DB, chatId);
-
   if (text === "ℹ️ Помощь" || text === "/help") { await tg.sendMessage(chatId, HELP_TEXT, mainMenuKeyboard); return; }
-
   if (text === "🗂 Мои отчёты" || text === "/reports") {
     const reports = await listRecentReports(env.DB, employeeId, 5);
     if (!reports.length) { await tg.sendMessage(chatId, "У вас пока нет отчётов.", mainMenuKeyboard); return; }
@@ -192,17 +181,14 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
     const lines = reports.map(r => `<b>${r.public_id}</b> — ${r.object_name}\n${statusLabel[r.status] ?? r.status} · ${r.started_at}`);
     await tg.sendMessage(chatId, lines.join("\n\n"), mainMenuKeyboard); return;
   }
-
   if (text === "📋 Новый фотоотчёт" || text === "/new") {
     await saveSession(env.DB, { telegram_id: chatId, state: "awaiting_object_name", report_id: null, object_name: null, address: null, latitude: null, longitude: null });
     await tg.sendMessage(chatId, "Введите название или номер объекта:"); return;
   }
-
   if (session.state === "awaiting_object_name") {
     if (!text) { await tg.sendMessage(chatId, "Пожалуйста, отправьте название объекта текстом."); return; }
     session.object_name = text; session.state = "awaiting_address"; await saveSession(env.DB, session); await tg.sendMessage(chatId, "Теперь укажите адрес объекта:"); return;
   }
-
   if (session.state === "awaiting_address") {
     if (!text) { await tg.sendMessage(chatId, "Пожалуйста, отправьте адрес объекта текстом."); return; }
     session.address = text;
@@ -212,16 +198,9 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
     session.state = "awaiting_photos_before"; session.report_id = reportId; await saveSession(env.DB, session);
     await tg.sendMessage(chatId, `Отчёт <b>${publicId}</b> создан.\n\nОтправьте фотографии <b>ДО</b> уборки. Когда закончите — нажмите кнопку под сообщением.`, doneButton("before")); return;
   }
-
-  if (session.state === "awaiting_photos_before" && msg.photo?.length) {
-    const largest = msg.photo[msg.photo.length - 1]; await addPhoto(env.DB, session.report_id!, "before", largest.file_id, largest.file_unique_id); return;
-  }
-  if (session.state === "awaiting_photos_after" && msg.photo?.length) {
-    const largest = msg.photo[msg.photo.length - 1]; await addPhoto(env.DB, session.report_id!, "after", largest.file_id, largest.file_unique_id); return;
-  }
-  if ((session.state === "awaiting_photos_before" || session.state === "awaiting_photos_after") && !msg.photo) {
-    await tg.sendMessage(chatId, "Отправьте, пожалуйста, фотографию, либо нажмите кнопку «Готово» под предыдущим сообщением."); return;
-  }
+  if (session.state === "awaiting_photos_before" && msg.photo?.length) { const largest = msg.photo[msg.photo.length - 1]; await addPhoto(env.DB, session.report_id!, "before", largest.file_id, largest.file_unique_id); return; }
+  if (session.state === "awaiting_photos_after" && msg.photo?.length) { const largest = msg.photo[msg.photo.length - 1]; await addPhoto(env.DB, session.report_id!, "after", largest.file_id, largest.file_unique_id); return; }
+  if ((session.state === "awaiting_photos_before" || session.state === "awaiting_photos_after") && !msg.photo) { await tg.sendMessage(chatId, "Отправьте, пожалуйста, фотографию, либо нажмите кнопку «Готово» под предыдущим сообщением."); return; }
   await tg.sendMessage(chatId, "Выберите действие в меню:", mainMenuKeyboard);
 }
 

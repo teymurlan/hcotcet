@@ -1,29 +1,281 @@
-import {
-  TelegramClient,
-  TgUpdate,
-  TgMessage,
-  TgCallbackQuery,
-  mainMenuKeyboard,
-  doneButton,
-} from "./telegram";
-import {
-  ensureEmployee,
-  getSession,
-  saveSession,
-  resetSession,
-  createObject,
-  createReport,
-  addPhoto,
-  countPhotos,
-  completeReport,
-  listRecentReports,
-  logAction,
-} from "./db";
-
 export interface Env {
   DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
+}
+
+interface TgUser {
+  id: number;
+  is_bot: boolean;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+}
+
+interface TgPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+}
+
+interface TgMessage {
+  message_id: number;
+  from?: TgUser;
+  chat: { id: number };
+  text?: string;
+  photo?: TgPhotoSize[];
+}
+
+interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  message?: TgMessage;
+  data?: string;
+}
+
+interface TgUpdate {
+  update_id: number;
+  message?: TgMessage;
+  callback_query?: TgCallbackQuery;
+}
+
+const API_BASE = "https://api.telegram.org/bot";
+
+class TelegramClient {
+  private token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
+
+  private async call(method: string, payload: Record<string, unknown>) {
+    const res = await fetch(`${API_BASE}${this.token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`Telegram API ${method} failed: ${res.status} ${body}`);
+    }
+    return res;
+  }
+
+  sendMessage(chatId: number, text: string, replyMarkup?: unknown) {
+    return this.call("sendMessage", {
+      chat_id: chatId,
+      text,
+      reply_markup: replyMarkup,
+      parse_mode: "HTML",
+    });
+  }
+
+  answerCallbackQuery(callbackQueryId: string, text?: string) {
+    return this.call("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      text,
+    });
+  }
+}
+
+const mainMenuKeyboard = {
+  keyboard: [
+    [{ text: "📋 Новый фотоотчёт" }],
+    [{ text: "🗂 Мои отчёты" }, { text: "ℹ️ Помощь" }],
+  ],
+  resize_keyboard: true,
+};
+
+function doneButton(phase: "before" | "after") {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: phase === "before" ? "✅ Фото ДО отправлены" : "✅ Фото ПОСЛЕ отправлены",
+          callback_data: `done_${phase}`,
+        },
+      ],
+    ],
+  };
+}
+
+interface Session {
+  telegram_id: number;
+  state: string | null;
+  report_id: number | null;
+  object_name: string | null;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+async function ensureEmployee(db: D1Database, user: TgUser) {
+  await db
+    .prepare(
+      `INSERT INTO employees (telegram_id, first_name, last_name, username)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(telegram_id) DO UPDATE SET
+         first_name = excluded.first_name,
+         last_name = excluded.last_name,
+         username = excluded.username`
+    )
+    .bind(user.id, user.first_name ?? null, user.last_name ?? null, user.username ?? null)
+    .run();
+
+  const row = await db
+    .prepare(`SELECT id FROM employees WHERE telegram_id = ?`)
+    .bind(user.id)
+    .first<{ id: number }>();
+  return row!.id;
+}
+
+async function getSession(db: D1Database, telegramId: number): Promise<Session> {
+  const row = await db
+    .prepare(`SELECT * FROM sessions WHERE telegram_id = ?`)
+    .bind(telegramId)
+    .first<Session>();
+  if (row) return row;
+  return {
+    telegram_id: telegramId,
+    state: "idle",
+    report_id: null,
+    object_name: null,
+    address: null,
+    latitude: null,
+    longitude: null,
+  };
+}
+
+async function saveSession(db: D1Database, session: Session) {
+  await db
+    .prepare(
+      `INSERT INTO sessions (telegram_id, state, report_id, object_name, address, latitude, longitude, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(telegram_id) DO UPDATE SET
+         state = excluded.state,
+         report_id = excluded.report_id,
+         object_name = excluded.object_name,
+         address = excluded.address,
+         latitude = excluded.latitude,
+         longitude = excluded.longitude,
+         updated_at = datetime('now')`
+    )
+    .bind(
+      session.telegram_id,
+      session.state,
+      session.report_id,
+      session.object_name,
+      session.address,
+      session.latitude,
+      session.longitude
+    )
+    .run();
+}
+
+async function resetSession(db: D1Database, telegramId: number) {
+  await saveSession(db, {
+    telegram_id: telegramId,
+    state: "idle",
+    report_id: null,
+    object_name: null,
+    address: null,
+    latitude: null,
+    longitude: null,
+  });
+}
+
+async function createObject(db: D1Database, name: string, address: string) {
+  const res = await db
+    .prepare(`INSERT INTO objects (name, address) VALUES (?, ?)`)
+    .bind(name, address)
+    .run();
+  return res.meta.last_row_id as number;
+}
+
+function generatePublicId() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `HC-${code}`;
+}
+
+async function createReport(db: D1Database, employeeId: number, objectId: number) {
+  const publicId = generatePublicId();
+  const res = await db
+    .prepare(
+      `INSERT INTO reports (public_id, employee_id, object_id, status)
+       VALUES (?, ?, ?, 'in_progress')`
+    )
+    .bind(publicId, employeeId, objectId)
+    .run();
+  return { reportId: res.meta.last_row_id as number, publicId };
+}
+
+async function addPhoto(
+  db: D1Database,
+  reportId: number,
+  phase: "before" | "after",
+  fileId: string,
+  fileUniqueId: string
+) {
+  await db
+    .prepare(
+      `INSERT INTO report_photos (report_id, phase, telegram_file_id, telegram_file_unique_id)
+       VALUES (?, ?, ?, ?)`
+    )
+    .bind(reportId, phase, fileId, fileUniqueId)
+    .run();
+}
+
+async function countPhotos(db: D1Database, reportId: number, phase: "before" | "after") {
+  const row = await db
+    .prepare(`SELECT COUNT(*) as c FROM report_photos WHERE report_id = ? AND phase = ?`)
+    .bind(reportId, phase)
+    .first<{ c: number }>();
+  return row?.c ?? 0;
+}
+
+async function completeReport(db: D1Database, reportId: number) {
+  await db
+    .prepare(
+      `UPDATE reports SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .bind(reportId)
+    .run();
+}
+
+async function listRecentReports(db: D1Database, employeeId: number, limit = 5) {
+  const { results } = await db
+    .prepare(
+      `SELECT r.public_id, r.status, r.started_at, o.name as object_name
+       FROM reports r
+       JOIN objects o ON o.id = r.object_id
+       WHERE r.employee_id = ?
+       ORDER BY r.started_at DESC
+       LIMIT ?`
+    )
+    .bind(employeeId, limit)
+    .all<{ public_id: string; status: string; started_at: string; object_name: string }>();
+  return results;
+}
+
+async function logAction(
+  db: D1Database,
+  telegramId: number,
+  action: string,
+  reportId: number | null,
+  details?: string
+) {
+  await db
+    .prepare(
+      `INSERT INTO audit_log (telegram_id, action, report_id, details) VALUES (?, ?, ?, ?)`
+    )
+    .bind(telegramId, action, reportId, details ?? null)
+    .run();
 }
 
 const HELP_TEXT =
@@ -40,14 +292,25 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-        if (request.method === "POST" && url.pathname === "/webhook") {
-      let update: TgUpdate;
-      try {
-        update = await request.json();
-      } catch {
-        return new Response("bad request", { status: 400 });
+    if (request.method === "GET" && url.pathname === "/debug-check-secret") {
+      const candidate = url.searchParams.get("value") ?? "";
+      const expected = env.TELEGRAM_WEBHOOK_SECRET ?? "";
+      return new Response(
+        JSON.stringify({
+          match: candidate === expected,
+          expected_length: expected.length,
+          candidate_length: candidate.length,
+        }),
+        { headers: { "content-type": "application/json" } }
+      );
+    }
+
+    if (request.method === "POST" && url.pathname === "/webhook") {
+      const secret = request.headers.get("x-telegram-bot-api-secret-token");
+      if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
       }
-      ...
+
       let update: TgUpdate;
       try {
         update = await request.json();
@@ -66,8 +329,6 @@ export default {
         console.error("Error handling update", err);
       }
 
-      // Telegram ждёт 200 OK независимо от результата обработки,
-      // иначе будет повторять доставку апдейта.
       return new Response("ok", { status: 200 });
     }
 
@@ -130,8 +391,6 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
     return;
   }
 
-  // --- Ветки, зависящие от текущего состояния диалога ---
-
   if (session.state === "awaiting_object_name") {
     if (!text) {
       await tg.sendMessage(chatId, "Пожалуйста, отправьте название объекта текстом.");
@@ -146,7 +405,7 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
 
   if (session.state === "awaiting_address") {
     if (!text) {
-      await tg.sendMessage(chatId, "Пожалуйста, отправьте адрес текстом.");
+      await tg.sendMessage(chatId, "Пожалуйста, отправьте адрес объекта текстом.");
       return;
     }
     session.address = text;
@@ -183,11 +442,13 @@ async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
     (session.state === "awaiting_photos_before" || session.state === "awaiting_photos_after") &&
     !msg.photo
   ) {
-    await tg.sendMessage(chatId, "Отправьте, пожалуйста, фотографию, либо нажмите кнопку «Готово» под предыдущим сообщением.");
+    await tg.sendMessage(
+      chatId,
+      "Отправьте, пожалуйста, фотографию, либо нажмите кнопку «Готово» под предыдущим сообщением."
+    );
     return;
   }
 
-  // Нет активного сценария — просто покажем меню
   await tg.sendMessage(chatId, "Выберите действие в меню:", mainMenuKeyboard);
 }
 
@@ -216,7 +477,7 @@ async function handleCallback(env: Env, tg: TelegramClient, cq: TgCallbackQuery)
       return;
     }
     await completeReport(env.DB, session.report_id!);
-    await logAction(env.DB, chatId, "report_completed", session.report_id, null);
+    await logAction(env.DB, chatId, "report_completed", session.report_id, undefined);
     await tg.answerCallbackQuery(cq.id, "Отчёт завершён");
     await resetSession(env.DB, chatId);
     await tg.sendMessage(chatId, "✅ <b>Фотоотчёт завершён</b>. Спасибо!", mainMenuKeyboard);

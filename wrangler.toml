@@ -1,5 +1,5 @@
 name = "house-cleaning-bot"
-main = "src/index.ts"
+main = "index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 

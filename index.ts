@@ -71,6 +71,24 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
+    if (request.method === "GET" && url.pathname === "/debug-send") {
+      const chatId = Number(url.searchParams.get("chat_id"));
+      if (!Number.isSafeInteger(chatId) || chatId <= 0) {
+        return new Response("invalid chat_id", { status: 400 });
+      }
+
+      const result = await telegramSendMessage(
+        env,
+        chatId,
+        "TEST: Worker успешно вызвал Telegram sendMessage."
+      );
+
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/webhook") {
       let update: TgUpdate;
 

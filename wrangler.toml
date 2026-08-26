@@ -1,4 +1,4 @@
-name = "house-cleaning-bot"
+name = "hcotcet"
 main = "index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -8,7 +8,6 @@ binding = "DB"
 database_name = "house-cleaning-reports"
 database_id = "5389b7bb-7610-4f97-a51a-73c698bee84b"
 
-# Secrets (set these in the Cloudflare dashboard, never in this file or in Git):
-#   TELEGRAM_BOT_TOKEN     - the bot token from @BotFather
-#   TELEGRAM_WEBHOOK_SECRET - any random string you choose, used to verify
-#                             that webhook requests really come from Telegram
+# Secrets are configured in the Cloudflare dashboard, never in this file or in Git.
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_WEBHOOK_SECRET

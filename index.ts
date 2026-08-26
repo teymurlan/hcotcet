@@ -25,34 +25,58 @@ interface TgMessage {
   photo?: TgPhotoSize[];
 }
 
+interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  message?: TgMessage;
+  data?: string;
+}
+
 interface TgUpdate {
   update_id: number;
   message?: TgMessage;
+  callback_query?: TgCallbackQuery;
 }
 
 const API_BASE = "https://api.telegram.org/bot";
 
-async function telegramSendMessage(env: Env, chatId: number, text: string, replyMarkup?: unknown) {
-  const response = await fetch(`${API_BASE}${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+class TelegramClient {
+  private token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
+
+  private async call(method: string, payload: Record<string, unknown>) {
+    const res = await fetch(`${API_BASE}${this.token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`Telegram API ${method} failed: ${res.status} ${body}`);
+    }
+
+    return res;
+  }
+
+  sendMessage(chatId: number, text: string, replyMarkup?: unknown) {
+    return this.call("sendMessage", {
       chat_id: chatId,
       text,
       reply_markup: replyMarkup,
       parse_mode: "HTML",
-    }),
-  });
-
-  const body = await response.text();
-
-  if (!response.ok) {
-    console.error(`Telegram sendMessage failed: ${response.status} ${body}`);
-  } else {
-    console.log(`Telegram sendMessage succeeded: ${response.status} ${body}`);
+    });
   }
 
-  return { status: response.status, ok: response.ok, body };
+  answerCallbackQuery(callbackQueryId: string, text?: string) {
+    return this.call("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      text,
+    });
+  }
 }
 
 const mainMenuKeyboard = {
@@ -63,62 +87,70 @@ const mainMenuKeyboard = {
   resize_keyboard: true,
 };
 
+const HELP_TEXT =
+  "Этот бот нужен для фотоотчётов по уборке объектов.\n\n" +
+  "📋 <b>Новый фотоотчёт</b> — начать новый фотоотчёт.\n" +
+  "🗂 <b>Мои отчёты</b> — просмотр отчётов будет подключён после подключения базы данных.\n\n" +
+  "Сейчас бот работает в тестовом режиме без сохранения данных.";
+
+async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
+
+  if (text === "/start") {
+    await tg.sendMessage(
+      chatId,
+      "<b>House Cleaning — Фотоотчёты</b>\n\nБот работает.\n\nВыберите действие в меню ниже.",
+      mainMenuKeyboard
+    );
+    return;
+  }
+
+  if (text === "ℹ️ Помощь" || text === "/help") {
+    await tg.sendMessage(chatId, HELP_TEXT, mainMenuKeyboard);
+    return;
+  }
+
+  if (text === "📋 Новый фотоотчёт" || text === "/new") {
+    await tg.sendMessage(
+      chatId,
+      "📋 <b>Новый фотоотчёт</b>\n\nТестовый режим без базы данных.\n\nОтправьте название или номер объекта.",
+      mainMenuKeyboard
+    );
+    return;
+  }
+
+  if (text === "🗂 Мои отчёты" || text === "/reports") {
+    await tg.sendMessage(
+      chatId,
+      "🗂 <b>Мои отчёты</b>\n\nСохранение и просмотр отчётов будут подключены после включения базы данных.",
+      mainMenuKeyboard
+    );
+    return;
+  }
+
+  if (msg.photo?.length) {
+    await tg.sendMessage(
+      chatId,
+      "Фото получено. Сейчас работает тестовый режим без сохранения в базе.",
+      mainMenuKeyboard
+    );
+    return;
+  }
+
+  await tg.sendMessage(chatId, "Выберите действие в меню:", mainMenuKeyboard);
+}
+
+async function handleCallback(env: Env, tg: TelegramClient, cq: TgCallbackQuery) {
+  await tg.answerCallbackQuery(cq.id);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
       return new Response("ok", { status: 200 });
-    }
-
-    if (request.method === "GET" && url.pathname === "/debug-token") {
-      const token = env.TELEGRAM_BOT_TOKEN ?? "";
-      const tokenPattern = /^\d{6,12}:[A-Za-z0-9_-]{20,}$/;
-
-      let telegramStatus = 0;
-      let telegramOk = false;
-      let telegramBody = "";
-
-      if (token) {
-        const response = await fetch(`${API_BASE}${token}/getMe`);
-        telegramStatus = response.status;
-        telegramBody = await response.text();
-        try {
-          telegramOk = JSON.parse(telegramBody)?.ok === true;
-        } catch {
-          telegramOk = false;
-        }
-      }
-
-      return new Response(
-        JSON.stringify({
-          token_present: Boolean(token),
-          token_length: token.length,
-          token_format_valid: tokenPattern.test(token),
-          telegram_status: telegramStatus,
-          telegram_ok: telegramOk,
-          telegram_error: telegramOk ? null : telegramBody.slice(0, 300),
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }
-
-    if (request.method === "GET" && url.pathname === "/debug-send") {
-      const chatId = Number(url.searchParams.get("chat_id"));
-      if (!Number.isSafeInteger(chatId) || chatId <= 0) {
-        return new Response("invalid chat_id", { status: 400 });
-      }
-
-      const result = await telegramSendMessage(
-        env,
-        chatId,
-        "TEST: Worker успешно вызвал Telegram sendMessage."
-      );
-
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
     }
 
     if (request.method === "POST" && url.pathname === "/webhook") {
@@ -130,54 +162,13 @@ export default {
         return new Response("bad request", { status: 400 });
       }
 
+      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+
       try {
         if (update.message) {
-          const chatId = update.message.chat.id;
-          const text = update.message.text?.trim();
-
-          if (text === "/start") {
-            const result = await telegramSendMessage(
-              env,
-              chatId,
-              "<b>House Cleaning — Фотоотчёты</b>\n\nБот работает. База данных временно отключена.\n\nВыберите действие:",
-              mainMenuKeyboard
-            );
-
-            return new Response(
-              JSON.stringify({
-                webhook_received: true,
-                update_id: update.update_id,
-                chat_id: chatId,
-                telegram_send_message: result,
-              }),
-              { status: 200, headers: { "content-type": "application/json" } }
-            );
-          } else if (text === "ℹ️ Помощь" || text === "/help") {
-            await telegramSendMessage(
-              env,
-              chatId,
-              "Этот бот предназначен для фотоотчётов по уборке объектов.\n\nСейчас работает тестовый режим без сохранения данных.",
-              mainMenuKeyboard
-            );
-          } else if (text === "📋 Новый фотоотчёт" || text === "/new") {
-            await telegramSendMessage(
-              env,
-              chatId,
-              "📋 <b>Новый фотоотчёт</b>\n\nТестовый режим: отправьте название объекта.",
-              mainMenuKeyboard
-            );
-          } else if (text === "🗂 Мои отчёты" || text === "/reports") {
-            await telegramSendMessage(
-              env,
-              chatId,
-              "🗂 Сохранение базы временно отключено. Отчётов пока нет.",
-              mainMenuKeyboard
-            );
-          } else if (update.message.photo?.length) {
-            await telegramSendMessage(env, chatId, "Фото получено. Сейчас работаем без сохранения в базе.");
-          } else {
-            await telegramSendMessage(env, chatId, "Бот получил сообщение. Выберите действие в меню:", mainMenuKeyboard);
-          }
+          await handleMessage(env, tg, update.message);
+        } else if (update.callback_query) {
+          await handleCallback(env, tg, update.callback_query);
         }
       } catch (error) {
         console.error("Webhook handler error", error);

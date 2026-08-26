@@ -44,12 +44,15 @@ async function telegramSendMessage(env: Env, chatId: number, text: string, reply
     }),
   });
 
+  const body = await response.text();
+
   if (!response.ok) {
-    const body = await response.text();
     console.error(`Telegram sendMessage failed: ${response.status} ${body}`);
+  } else {
+    console.log(`Telegram sendMessage succeeded: ${response.status} ${body}`);
   }
 
-  return response;
+  return { status: response.status, ok: response.ok, body };
 }
 
 const mainMenuKeyboard = {
@@ -83,11 +86,21 @@ export default {
           const text = update.message.text?.trim();
 
           if (text === "/start") {
-            await telegramSendMessage(
+            const result = await telegramSendMessage(
               env,
               chatId,
               "<b>House Cleaning — Фотоотчёты</b>\n\nБот работает. База данных временно отключена.\n\nВыберите действие:",
               mainMenuKeyboard
+            );
+
+            return new Response(
+              JSON.stringify({
+                webhook_received: true,
+                update_id: update.update_id,
+                chat_id: chatId,
+                telegram_send_message: result,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
             );
           } else if (text === "ℹ️ Помощь" || text === "/help") {
             await telegramSendMessage(

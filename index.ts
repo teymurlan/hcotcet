@@ -306,11 +306,6 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/webhook") {
-      const secret = request.headers.get("x-telegram-bot-api-secret-token");
-      if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
-      }
-
       let update: TgUpdate;
       try {
         update = await request.json();

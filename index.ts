@@ -174,7 +174,7 @@ async function saveSession(db: D1Database, session: Session) {
 }
 
 async function resetSession(db: D1Database, telegramId: number) {
-  await saveSession(db, {
+  await saveSession(env.DB, {
     telegram_id: telegramId,
     state: "idle",
     report_id: null,
@@ -334,20 +334,20 @@ export default {
 async function handleMessage(env: Env, tg: TelegramClient, msg: TgMessage) {
   if (!msg.from) return;
   const chatId = msg.chat.id;
-  const employeeId = await ensureEmployee(env.DB, msg.from);
-  const session = await getSession(env.DB, chatId);
-
   const text = msg.text?.trim();
 
   if (text === "/start") {
-    await resetSession(env.DB, chatId);
-    await tg.sendMessage(
-      chatId,
-      "<b>House Cleaning — Фотоотчёты</b>\n\nВыберите действие в меню ниже.",
-      mainMenuKeyboard
-    );
+    await tg.sendMessage(chatId, "ТЕСТ: Worker получил /start. Telegram и токен работают.");
+    try {
+      await resetSession(env.DB, chatId);
+    } catch (err) {
+      console.error("D1 resetSession failed", err);
+    }
     return;
   }
+
+  const employeeId = await ensureEmployee(env.DB, msg.from);
+  const session = await getSession(env.DB, chatId);
 
   if (text === "ℹ️ Помощь" || text === "/help") {
     await tg.sendMessage(chatId, HELP_TEXT, mainMenuKeyboard);

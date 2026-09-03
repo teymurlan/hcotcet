@@ -22,7 +22,7 @@ type State =
 interface TgUser { id: number; is_bot?: boolean; first_name: string; last_name?: string; username?: string; }
 interface TgPhoto { file_id: string; file_unique_id: string; width: number; height: number; }
 interface TgLocation { latitude: number; longitude: number; horizontal_accuracy?: number; }
-interface TgMessage { message_id: number; from?: TgUser; chat: { id: number; type?: string }; text?: string; photo?: TgPhoto[]; location?: TgLocation; }
+interface TgVideo { file_id: string; file_unique_id: string; duration?: number; width?: number; height?: number; }\ninterface TgMessage { message_id: number; from?: TgUser; chat: { id: number; type?: string }; text?: string; photo?: TgPhoto[]; video?: TgVideo; location?: TgLocation; }
 interface TgCallback { id: string; from: TgUser; message?: TgMessage; data?: string; }
 interface TgUpdate { update_id: number; message?: TgMessage; callback_query?: TgCallback; }
 interface TgResult<T> { ok: boolean; result?: T; description?: string; }
@@ -64,7 +64,7 @@ const MAX_TEXT = 1500;
 const MAX_HISTORY = 10;
 const sessions = new Map<number, Session>();
 const histories = new Map<number, CompletedReport[]>();
-const processedUpdates = new Set<number>();
+const processedUpdates = new Set<number>();\nconst uiMessages = new Map<number, number>();
 
 class Telegram {
   constructor(private readonly token: string) {}
@@ -108,6 +108,10 @@ class Telegram {
     return this.call("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: markup });
   }
 
+  editMessageText(chatId: number, messageId: number, text: string, markup?: unknown): Promise<TgMessage> {
+    return this.call<TgMessage>("editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) });
+  }
+
   sendMediaGroup(chatId: number, media: unknown[]): Promise<TgMessage[]> {
     return this.call<TgMessage[]>("sendMediaGroup", { chat_id: chatId, media });
   }
@@ -115,9 +119,11 @@ class Telegram {
 
 const MAIN = {
   inline_keyboard: [
-    [{ text: "🧹 Начать объект", callback_data: "new" }],
-    [{ text: "🗂 Мои отчёты", callback_data: "history" }, { text: "👤 Профиль", callback_data: "profile" }],
-    [{ text: "ℹ️ Помощь", callback_data: "help" }],
+    [{ text: "🟢 НАЧАТЬ УБОРКУ", callback_data: "new" }],
+    [{ text: "🔵 МОИ ОТЧЁТЫ", callback_data: "history" }, { text: "🟣 ПРОФИЛЬ", callback_data: "profile" }],
+    [{ text: "🟠 ТЕКУЩИЙ ОБЪЕКТ", callback_data: "current" }],
+    [{ text: "📊 СТАТИСТИКА", callback_data: "stats" }, { text: "⚙️ НАСТРОЙКИ", callback_data: "settings" }],
+    [{ text: "ℹ️ ПОМОЩЬ", callback_data: "help" }],
   ],
 };
 const CANCEL = { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]] };
@@ -225,6 +231,8 @@ async function safeDelete(tg: Telegram, chatId: number, messageId?: number): Pro
 }
 async function replaceStep(tg: Telegram, chatId: number, s: Session, text: string, markup?: unknown, extra: Record<string, unknown> = {}): Promise<void> {
   await safeDelete(tg, chatId, s.lastBotMessageId);
+  await safeDelete(tg, chatId, uiMessages.get(chatId));
+  uiMessages.delete(chatId);
   const sent = await tg.sendMessage(chatId, text, markup, extra);
   s.lastBotMessageId = sent.message_id;
   saveSession(chatId, s);
@@ -243,8 +251,14 @@ async function adminMedia(tg: Telegram, env: Env, ids: string[], caption: string
     try { await tg.sendMediaGroup(adminId, media); } catch (error) { console.error("adminMedia", error); }
   }
 }
-async function mainMenu(tg: Telegram, chatId: number, title = "<b>👋 House Cleaning</b>\n\nФотоотчёты по объектам."): Promise<void> {
-  await tg.sendMessage(chatId, `${title}\n\nВыберите действие:`, MAIN);
+async function mainMenu(tg: Telegram, chatId: number, title = "<b>🧹 HOUSE CLEANING</b>\n<i>Фотоотчёты сотрудников</i>"): Promise<void> {
+  const text = `${title}\n\n<b>Выберите действие:</b>`;
+  const previous = uiMessages.get(chatId);
+  if (previous) {
+    try { await tg.deleteMessage(chatId, previous); } catch {}
+  }
+  const sent = await tg.sendMessage(chatId, text, MAIN);
+  uiMessages.set(chatId, sent.message_id);
 }
 async function startNewReport(tg: Telegram, chatId: number, user: TgUser): Promise<void> {
   const old = getSession(chatId);
@@ -254,7 +268,7 @@ async function startNewReport(tg: Telegram, chatId: number, user: TgUser): Promi
     beforePhotos: [], afterPhotos: [], defects: "", createdAt: now(), expiresAt: Date.now() + SESSION_TTL,
   };
   saveSession(chatId, s);
-  await replaceStep(tg, chatId, s, `<b>🧹 Новый объект</b>\n\n<b>Шаг 1 из 7 — Объект</b>\n\nВведите название или номер объекта.\n<i>Например: Объект №123</i>`, CANCEL);
+  await replaceStep(tg, chatId, s, `<b>🧹 Новый объект</b>\n\n<b>Шаг 1 из 6 — Объект</b>\n\nВведите название или номер объекта.\n<i>Например: Объект №123</i>`, CANCEL);
 }
 
 async function handleText(tg: Telegram, env: Env, msg: TgMessage): Promise<void> {
@@ -271,7 +285,7 @@ async function handleText(tg: Telegram, env: Env, msg: TgMessage): Promise<void>
   if (text === "/start" || text === "/menu") {
     if (current) await safeDelete(tg, chatId, current.lastBotMessageId);
     clearSession(chatId);
-    await mainMenu(tg, chatId);
+    await mainMenu(tg, chatId, "<b>🧹 HOUSE CLEANING</b>\n<i>Добро пожаловать в систему фотоотчётов</i>");
     await safeDelete(tg, chatId, msg.message_id);
     return;
   }
@@ -285,7 +299,7 @@ async function handleText(tg: Telegram, env: Env, msg: TgMessage): Promise<void>
 
   switch (s.state) {
     case "awaiting_object":
-      if (text) { s.objectName = text; s.state = "awaiting_address"; await replaceStep(tg, chatId, s, `<b>📍 Шаг 2 из 7 — Адрес</b>\n\nОбъект: <b>${escapeHtml(s.objectName)}</b>\n\nВведите полный адрес.`, ADDRESS); }
+      if (text) { s.objectName = text; s.state = "awaiting_address"; await replaceStep(tg, chatId, s, `<b>📍 Шаг 2 из 6 — Адрес</b>\n\nОбъект: <b>${escapeHtml(s.objectName)}</b>\n\nВведите полный адрес.`, ADDRESS); }
       break;
     case "awaiting_address":
       if (text) { s.address = text; s.state = "confirm_address"; await replaceStep(tg, chatId, s, `<b>📍 Проверьте адрес</b>\n\n<b>${escapeHtml(s.objectName)}</b>\n${escapeHtml(s.address)}\n\nАдрес указан верно?`, ADDRESS_CONFIRM); }
@@ -295,7 +309,7 @@ async function handleText(tg: Telegram, env: Env, msg: TgMessage): Promise<void>
         s.defects = text;
         s.state = "after_photos";
         await adminMessage(tg, env, `⚠️ <b>ДЕФЕКТЫ ДО УБОРКИ</b>\n\n${startAdminText(s)}\n\n📝 ${escapeHtml(text)}`);
-        await replaceStep(tg, chatId, s, `<b>📸 Шаг 5 из 7 — Фото ПОСЛЕ</b>\n\nОтправляйте фото результата.\n\nФото ПОСЛЕ: <b>0</b>`, photoMenu("after"));
+        await replaceStep(tg, chatId, s, `<b>📸 Шаг 4 из 6 — Фото ПОСЛЕ</b>\n\nОтправляйте фото результата.\n\nФото ПОСЛЕ: <b>0</b>`, photoMenu("after"));
       }
       break;
     case "awaiting_expense_amount": {
@@ -303,7 +317,7 @@ async function handleText(tg: Telegram, env: Env, msg: TgMessage): Promise<void>
       if (Number.isFinite(amount) && amount > 0 && amount <= 100000) {
         s.expenseAmount = Math.round(amount * 100) / 100;
         s.state = "confirm_finish";
-        await replaceStep(tg, chatId, s, `<b>📋 Шаг 7 из 7 — Проверка</b>\n\n${statusText(s)}\n\n<b>Всё верно?</b>`, FINISH);
+        await replaceStep(tg, chatId, s, `<b>📋 Шаг 6 из 6 — Проверка</b>\n\n${statusText(s)}\n\n<b>Всё верно?</b>`, FINISH);
       } else {
         await replaceStep(tg, chatId, s, `Введите сумму числом, например <b>850</b>.`, CANCEL);
       }
@@ -322,7 +336,7 @@ async function handleLocation(tg: Telegram, chatId: number, msg: TgMessage): Pro
   s.longitude = msg.location.longitude;
   s.state = "before_photos";
   await safeDelete(tg, chatId, s.lastBotMessageId);
-  const sent = await tg.sendMessage(chatId, `<b>📸 Шаг 4 из 7 — Фото ДО</b>\n\n📍 Геопозиция получена ✅\n\nОтправьте фотографии объекта ДО уборки.\n\nФото ДО: <b>0</b>`, photoMenu("before"), { reply_markup: REMOVE_KEYBOARD });
+  const sent = await tg.sendMessage(chatId, `<b>📸 Шаг 3 из 6 — Фото ДО</b>\n\n📍 Геопозиция получена ✅\n\nОтправьте фотографии объекта ДО уборки.\n\nФото ДО: <b>0</b>`, photoMenu("before"), { reply_markup: REMOVE_KEYBOARD });
   s.lastBotMessageId = sent.message_id;
   saveSession(chatId, s);
   await safeDelete(tg, chatId, msg.message_id);
@@ -381,22 +395,36 @@ async function handleCallback(tg: Telegram, env: Env, cq: TgCallback): Promise<v
       case "profile":
         await mainMenu(tg, chatId, `<b>👤 Профиль</b>\n\nИмя: <b>${escapeHtml([cq.from.first_name, cq.from.last_name].filter(Boolean).join(" ") || "Без имени")}</b>\nUsername: <b>${escapeHtml(cq.from.username ? `@${cq.from.username}` : "не указан")}</b>\nID: <code>${cq.from.id}</code>`);
         return;
+      case "current":
+        if (!s) { await mainMenu(tg, chatId, "<b>🟠 ТЕКУЩИЙ ОБЪЕКТ</b>\n\nСейчас активного объекта нет. Нажмите «🟢 НАЧАТЬ УБОРКУ»."); return; }
+        await replaceStep(tg, chatId, s, `<b>🟠 ТЕКУЩИЙ ОБЪЕКТ</b>\n\n${statusText(s)}`, { inline_keyboard: [[{ text: "🔄 Обновить", callback_data: "current" }],[{ text: "❌ Отменить отчёт", callback_data: "cancel" }]] });
+        return;
+      case "stats": {
+        const history = histories.get(cq.from.id) ?? [];
+        const completed = history.length;
+        const active = s ? 1 : 0;
+        await mainMenu(tg, chatId, `<b>📊 МОЯ СТАТИСТИКА</b>\n\n🏁 Завершено: <b>${completed}</b>\n🟠 В работе: <b>${active}</b>\n📅 Показано последних: <b>${MAX_HISTORY}</b>`);
+        return;
+      }
+      case "settings":
+        await mainMenu(tg, chatId, `<b>⚙️ НАСТРОЙКИ</b>\n\n🔔 Уведомления: включены\n🧹 Режим: сотрудник\n\nНастройки сотрудника будут расширены в следующем обновлении.`);
+        return;
       case "cancel":
         if (s) await safeDelete(tg, chatId, s.lastBotMessageId);
         clearSession(chatId);
         await mainMenu(tg, chatId, "<b>❌ Отчёт отменён.</b>");
         return;
       case "back_object":
-        if (s?.state === "awaiting_address") { s.state = "awaiting_object"; await replaceStep(tg, chatId, s, `<b>🔙 Шаг 1 из 7 — Объект</b>\n\nВведите название или номер объекта.`, CANCEL); }
+        if (s?.state === "awaiting_address") { s.state = "awaiting_object"; await replaceStep(tg, chatId, s, `<b>🔙 Шаг 1 из 6 — Объект</b>\n\nВведите название или номер объекта.`, CANCEL); }
         return;
       case "edit_address":
-        if (s?.state === "confirm_address") { s.state = "awaiting_address"; await replaceStep(tg, chatId, s, `<b>✏️ Шаг 2 из 7 — Адрес</b>\n\nВведите адрес ещё раз.`, ADDRESS); }
+        if (s?.state === "confirm_address") { s.state = "awaiting_address"; await replaceStep(tg, chatId, s, `<b>✏️ Шаг 2 из 6 — Адрес</b>\n\nВведите адрес ещё раз.`, ADDRESS); }
         return;
       case "address_ok":
         if (s?.state === "confirm_address") {
           s.state = "awaiting_location";
           await safeDelete(tg, chatId, s.lastBotMessageId);
-          const sent = await tg.sendMessage(chatId, `<b>📍 Шаг 3 из 7 — Геопозиция</b>\n\nАдрес: <b>${escapeHtml(s.address)}</b>\n\nНажмите кнопку ниже и отправьте текущую геопозицию.`, undefined, { reply_markup: LOCATION });
+          const sent = await tg.sendMessage(chatId, `<b>📍 Шаг 3 из 6 — Геопозиция</b>\n\nАдрес: <b>${escapeHtml(s.address)}</b>\n\nНажмите кнопку ниже и отправьте текущую геопозицию.`, undefined, { reply_markup: LOCATION });
           s.lastBotMessageId = sent.message_id;
           saveSession(chatId, s);
         }
@@ -409,17 +437,18 @@ async function handleCallback(tg: Telegram, env: Env, cq: TgCallback): Promise<v
         saveSession(chatId, s);
         await adminMessage(tg, env, startAdminText(s));
         await adminMedia(tg, env, s.beforePhotos, `🚀 <b>Фото ДО · ${escapeHtml(s.reportId)}</b>`);
-        await replaceStep(tg, chatId, s, `<b>⚠️ Шаг 5 из 7 — Дефекты</b>\n\nЕсть ли повреждения или дефекты ДО уборки?`, DEFECTS);
+        await replaceStep(tg, chatId, s, `<b>⚠️ Шаг 4 из 6 — Дефекты</b>\n\nЕсть ли повреждения или дефекты ДО уборки?`, DEFECTS);
         return;
       case "no_defects":
         if (s?.state !== "awaiting_defects") return;
         s.defects = "Нет дефектов";
         s.state = "after_photos";
         await adminMessage(tg, env, `⚠️ <b>ДЕФЕКТЫ ДО УБОРКИ</b>\n\n${startAdminText(s)}\n\n📝 <b>Нет дефектов</b>`);
-        await replaceStep(tg, chatId, s, `<b>📸 Шаг 5 из 7 — Фото ПОСЛЕ</b>\n\nОтправляйте фото результата.\n\nФото ПОСЛЕ: <b>0</b>`, photoMenu("after"));
+        await replaceStep(tg, chatId, s, `<b>📸 Шаг 4 из 6 — Фото ПОСЛЕ</b>\n\nОтправляйте фото результата.\n\nФото ПОСЛЕ: <b>0</b>`, photoMenu("after"));
         return;
       case "write_defects":
         if (s?.state !== "awaiting_defects") return;
+        s.state = "awaiting_defects";
         await replaceStep(tg, chatId, s, `<b>✏️ Опишите дефекты</b>\n\nНапишите одним сообщением, что было повреждено или уже имело дефект до уборки.`, CANCEL);
         return;
       case "finish_after":
@@ -427,7 +456,7 @@ async function handleCallback(tg: Telegram, env: Env, cq: TgCallback): Promise<v
         if (!s.afterPhotos.length) { await replaceStep(tg, chatId, s, `⚠️ Сначала отправьте хотя бы одно фото ПОСЛЕ.`, photoMenu("after")); return; }
         s.afterFinishedAt = now();
         s.state = "awaiting_expense_decision";
-        await replaceStep(tg, chatId, s, `<b>💸 Шаг 6 из 7 — Расходы</b>\n\nБыли расходы на химию, такси или другие нужды?`, EXPENSES);
+        await replaceStep(tg, chatId, s, `<b>💸 Шаг 5 из 6 — Расходы</b>\n\nБыли расходы на химию, такси или другие нужды?`, EXPENSES);
         return;
       case "expense_yes":
         if (s?.state !== "awaiting_expense_decision") return;
@@ -438,7 +467,7 @@ async function handleCallback(tg: Telegram, env: Env, cq: TgCallback): Promise<v
         if (s?.state !== "awaiting_expense_decision") return;
         s.expenseAmount = undefined;
         s.state = "confirm_finish";
-        await replaceStep(tg, chatId, s, `<b>📋 Шаг 7 из 7 — Проверка</b>\n\n${statusText(s)}\n\n<b>Всё верно?</b>`, FINISH);
+        await replaceStep(tg, chatId, s, `<b>📋 Шаг 6 из 6 — Проверка</b>\n\n${statusText(s)}\n\n<b>Всё верно?</b>`, FINISH);
         return;
       case "continue_after":
         if (s?.state !== "confirm_finish") return;

@@ -57,6 +57,63 @@ async function verifyInitData(initData:string,token:string):Promise<TgUser>{if(!
 async function auth(req:Request,env:Env){return verifyInitData(req.headers.get("X-Telegram-Init-Data")||new URL(req.url).searchParams.get("initData")||"",env.TELEGRAM_BOT_TOKEN)}
 async function ensureEmployee(env:Env,u:TgUser){await env.DB.prepare(`INSERT INTO employees (telegram_id,first_name,last_name,username,active) VALUES (?,?,?,?,1) ON CONFLICT(telegram_id) DO UPDATE SET first_name=excluded.first_name,last_name=excluded.last_name,username=excluded.username,active=1`).bind(u.id,u.first_name,u.last_name??null,u.username??null).run();}
 interface BroadcastSession { state:string; source_chat_id?:number|null; source_message_id?:number|null; }
+async function ensureBroadcastStorage(env:Env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS broadcast_sessions (
+    admin_telegram_id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL,
+    source_chat_id INTEGER,
+    source_message_id INTEGER,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+async function getBroadcastSession(env:Env,adminId:number):Promise<BroadcastSession|null>{
+  await ensureBroadcastStorage(env);
+  return await env.DB.prepare(`SELECT state,source_chat_id,source_message_id FROM broadcast_sessions WHERE admin_telegram_id=?`).bind(adminId).first<BroadcastSession>()||null;
+}
+async function setBroadcastSession(env:Env,adminId:number,state:string,sourceChatId?:number|null,sourceMessageId?:number|null){
+  await ensureBroadcastStorage(env);
+  await env.DB.prepare(`INSERT INTO broadcast_sessions(admin_telegram_id,state,source_chat_id,source_message_id,updated_at)
+    VALUES(?,?,?,?,datetime('now'))
+    ON CONFLICT(admin_telegram_id) DO UPDATE SET
+      state=excluded.state,
+      source_chat_id=excluded.source_chat_id,
+      source_message_id=excluded.source_message_id,
+      updated_at=datetime('now')`)
+    .bind(adminId,state,sourceChatId??null,sourceMessageId??null).run();
+}
+async function clearBroadcastSession(env:Env,adminId:number){
+  await ensureBroadcastStorage(env);
+  await env.DB.prepare(`DELETE FROM broadcast_sessions WHERE admin_telegram_id=?`).bind(adminId).run();
+}
+async function broadcastRecipientIds(env:Env,adminId:number):Promise<number[]>{
+  const ids=new Set<number>();
+  const rows=await env.DB.prepare(`SELECT telegram_id FROM employees WHERE active=1`).all();
+  for(const row of rows.results as any[]){
+    const id=Number(row.telegram_id);
+    if(Number.isFinite(id)&&id>0)ids.add(id);
+  }
+  for(const raw of (env.EMPLOYEE_IDS??'').split(',')){
+    const id=Number(raw.trim());
+    if(Number.isFinite(id)&&id>0)ids.add(id);
+  }
+  ids.delete(adminId);
+  return [...ids];
+}
+async function performBroadcast(env:Env,adminId:number,sourceChatId:number,sourceMessageId:number){
+  const recipients=await broadcastRecipientIds(env,adminId);
+  let sent=0,failed=0;
+  for(const chatId of recipients){
+    try{
+      await telegramCall(env,'copyMessage',{chat_id:chatId,from_chat_id:sourceChatId,message_id:sourceMessageId});
+      sent++;
+    }catch(e){
+      console.error('broadcast failed',chatId,e);
+      failed++;
+    }
+  }
+  return {total:recipients.length,sent,failed};
+}
+interface BroadcastSession { state:string; source_chat_id?:number|null; source_message_id?:number|null; }
 
 async function ensureBroadcastStorage(env:Env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS broadcast_sessions (
@@ -148,10 +205,9 @@ async function bot(env:Env,update:TgUpdate,base:string){
 
       if(c.data==='broadcast_new'){
         await setBroadcastSession(env,c.from.id,'waiting_message');
-        const recipients=await broadcastRecipientIds(env,c.from.id);
         await telegramCall(env,'sendMessage',{
           chat_id:c.from.id,
-          text:`📣 <b>Новая рассылка</b>\n\nПолучателей сейчас: <b>${recipients.length}</b>\n\nОтправьте следующим сообщением то, что нужно разослать сотрудникам. Поддерживаются текст, фото, видео и документы.\n\nДля отмены: /cancel`,
+          text:'📣 <b>Новая рассылка</b>\n\nОтправьте следующим сообщением то, что нужно разослать сотрудникам. Можно отправить текст, фото, видео или документ.\n\nДля отмены: /cancel',
           parse_mode:'HTML'
         });
         return;
@@ -175,16 +231,20 @@ async function bot(env:Env,update:TgUpdate,base:string){
       if(c.data==='broadcast_send'){
         const s=await getBroadcastSession(env,c.from.id);
         if(!s||s.state!=='waiting_confirm'||!s.source_chat_id||!s.source_message_id){
-          await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'Черновик рассылки не найден. Создайте новую рассылку.'});
+          await telegramCall(env,'sendMessage',{
+            chat_id:c.from.id,
+            text:'Черновик рассылки не найден. Создайте новую рассылку.'
+          });
           return;
         }
-        await setBroadcastSession(env,c.from.id,'sending',s.source_chat_id,s.source_message_id);
+
         await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'📤 Начинаю рассылку…'});
         const result=await performBroadcast(env,c.from.id,Number(s.source_chat_id),Number(s.source_message_id));
         await clearBroadcastSession(env,c.from.id);
+
         await telegramCall(env,'sendMessage',{
           chat_id:c.from.id,
-          text:`✅ <b>Рассылка завершена</b>\n\nПолучателей: <b>${result.total}</b>\nДоставлено: <b>${result.sent}</b>\nОшибок: <b>${result.failed}</b>`,
+          text:`✅ <b>Рассылка завершена</b>\n\nПолучателей: ${result.total}\nДоставлено: ${result.sent}\nОшибок: ${result.failed}`,
           parse_mode:'HTML'
         });
         return;
@@ -195,7 +255,7 @@ async function bot(env:Env,update:TgUpdate,base:string){
     if(c.data==='admin'&&isAdmin(env,c.from.id)){
       await telegramCall(env,'sendMessage',{
         chat_id:c.from.id,
-        text:'Панель администратора находится в приложении. Нажмите кнопку ниже.',
+        text:'Панель администратора теперь находится в приложении. Нажмите кнопку ниже.',
         reply_markup:{inline_keyboard:[[{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}]]}
       });
     }
@@ -204,6 +264,7 @@ async function bot(env:Env,update:TgUpdate,base:string){
 
   if(!m?.from||!isEmployee(env,m.from.id))return;
   await ensureEmployee(env,m.from);
+
   const admin=isAdmin(env,m.from.id);
 
   if(admin&&m.text==='/cancel'){
@@ -217,33 +278,37 @@ async function bot(env:Env,update:TgUpdate,base:string){
       chat_id:m.chat.id,
       text:`<b>House Cleaning</b>\n\nВсе фотоотчёты теперь в удобном приложении.\nНажмите «Открыть приложение».`,
       parse_mode:'HTML',
-      reply_markup:{inline_keyboard:[
-        [{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}],
-        ...(admin?[
-          [{text:'🛠 Панель администратора',callback_data:'admin'}],
-          [{text:'📣 Рассылка',callback_data:'broadcast_new'}]
-        ]:[])
-      ]}
+      reply_markup:{
+        inline_keyboard:[
+          [{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}],
+          ...(admin?[
+            [{text:'🛠 Панель администратора',callback_data:'admin'}],
+            [{text:'📣 Рассылка',callback_data:'broadcast_new'}]
+          ]:[])
+        ]
+      }
     });
     return;
   }
 
   if(admin){
     const s=await getBroadcastSession(env,m.from.id);
+
     if(s?.state==='waiting_message'){
-      const recipients=await broadcastRecipientIds(env,m.from.id);
       await setBroadcastSession(env,m.from.id,'waiting_confirm',m.chat.id,m.message_id);
       await telegramCall(env,'sendMessage',{
         chat_id:m.chat.id,
-        text:`Проверьте сообщение выше. Отправить его всем пользователям?\n\nПолучателей: <b>${recipients.length}</b>`,
-        parse_mode:'HTML',
-        reply_markup:{inline_keyboard:[
-          [{text:'✅ Отправить всем',callback_data:'broadcast_send'}],
-          [{text:'✏️ Изменить',callback_data:'broadcast_edit'},{text:'❌ Отмена',callback_data:'broadcast_cancel'}]
-        ]}
+        text:'Проверьте сообщение выше. Отправить его всем пользователям бота?',
+        reply_markup:{
+          inline_keyboard:[
+            [{text:'✅ Отправить всем',callback_data:'broadcast_send'}],
+            [{text:'✏️ Изменить',callback_data:'broadcast_edit'},{text:'❌ Отмена',callback_data:'broadcast_cancel'}]
+          ]
+        }
       });
       return;
     }
+
     if(s?.state==='waiting_confirm'){
       await telegramCall(env,'sendMessage',{
         chat_id:m.chat.id,

@@ -1,4 +1,5 @@
 name = "hcotcet"
+account_id = "be4097f25bd9cde14ddfd9f8518b0ae6"
 main = "index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]

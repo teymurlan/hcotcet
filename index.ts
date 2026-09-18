@@ -212,7 +212,29 @@ async function bot(env:Env,update:TgUpdate,base:string){
     return;
   }
 
+  if(admin&&(m.text==='/broadcast'||m.text==='📣 Рассылка всем')){
+    await setBroadcastSession(env,m.from.id,'waiting_message');
+    const recipients=await broadcastRecipientIds(env,m.from.id);
+    await telegramCall(env,'sendMessage',{
+      chat_id:m.chat.id,
+      text:`📣 <b>Рассылка всем пользователям</b>\n\nПолучателей сейчас: <b>${recipients.length}</b>\n\nОтправьте следующим сообщением текст, фото, видео или документ, который нужно разослать.\n\nДля отмены: /cancel`,
+      parse_mode:'HTML'
+    });
+    return;
+  }
+
   if(m.text==='/start'||m.text==='/app'||m.text==='Меню'){
+    if(admin){
+      try{
+        await telegramCall(env,'setMyCommands',{
+          scope:{type:'chat',chat_id:m.chat.id},
+          commands:[
+            {command:'broadcast',description:'Рассылка всем пользователям'},
+            {command:'app',description:'Открыть приложение'}
+          ]
+        });
+      }catch(e){console.error('setMyCommands failed',e)}
+    }
     await telegramCall(env,'sendMessage',{
       chat_id:m.chat.id,
       text:`<b>House Cleaning</b>\n\nВсе фотоотчёты теперь в удобном приложении.\nНажмите «Открыть приложение».`,
@@ -221,7 +243,7 @@ async function bot(env:Env,update:TgUpdate,base:string){
         [{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}],
         ...(admin?[
           [{text:'🛠 Панель администратора',callback_data:'admin'}],
-          [{text:'📣 Рассылка',callback_data:'broadcast_new'}]
+          [{text:'📣 Рассылка всем',callback_data:'broadcast_new'}]
         ]:[])
       ]}
     });

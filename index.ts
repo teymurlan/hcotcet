@@ -56,6 +56,70 @@ function equal(a:string,b:string){if(a.length!==b.length)return false;let x=0;fo
 async function verifyInitData(initData:string,token:string):Promise<TgUser>{if(!initData)throw new Error("Откройте приложение из Telegram");const p=new URLSearchParams(initData);const hash=p.get("hash")||"";p.delete("hash");const pairs=Array.from(p.entries()).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`);const secret=await hmac(new TextEncoder().encode(token),"WebAppData");const good=hex(await hmac(secret,pairs.join("\n")));if(!equal(good,hash))throw new Error("Недействительная сессия Telegram");const authDate=Number(p.get("auth_date"));if(!authDate||Date.now()/1000-authDate>24*60*60)throw new Error("Сессия Telegram устарела");const raw=p.get("user");if(!raw)throw new Error("Пользователь не найден");return JSON.parse(raw) as TgUser}
 async function auth(req:Request,env:Env){return verifyInitData(req.headers.get("X-Telegram-Init-Data")||new URL(req.url).searchParams.get("initData")||"",env.TELEGRAM_BOT_TOKEN)}
 async function ensureEmployee(env:Env,u:TgUser){await env.DB.prepare(`INSERT INTO employees (telegram_id,first_name,last_name,username,active) VALUES (?,?,?,?,1) ON CONFLICT(telegram_id) DO UPDATE SET first_name=excluded.first_name,last_name=excluded.last_name,username=excluded.username,active=1`).bind(u.id,u.first_name,u.last_name??null,u.username??null).run();}
+interface BroadcastSession { state:string; source_chat_id?:number|null; source_message_id?:number|null; }
+
+async function ensureBroadcastStorage(env:Env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS broadcast_sessions (
+    admin_telegram_id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL,
+    source_chat_id INTEGER,
+    source_message_id INTEGER,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+
+async function getBroadcastSession(env:Env,adminId:number):Promise<BroadcastSession|null>{
+  await ensureBroadcastStorage(env);
+  return await env.DB.prepare(`SELECT state,source_chat_id,source_message_id FROM broadcast_sessions WHERE admin_telegram_id=?`)
+    .bind(adminId).first<BroadcastSession>() || null;
+}
+
+async function setBroadcastSession(env:Env,adminId:number,state:string,sourceChatId?:number|null,sourceMessageId?:number|null){
+  await ensureBroadcastStorage(env);
+  await env.DB.prepare(`INSERT INTO broadcast_sessions(admin_telegram_id,state,source_chat_id,source_message_id,updated_at)
+    VALUES(?,?,?,?,datetime('now'))
+    ON CONFLICT(admin_telegram_id) DO UPDATE SET
+      state=excluded.state,
+      source_chat_id=excluded.source_chat_id,
+      source_message_id=excluded.source_message_id,
+      updated_at=datetime('now')`)
+    .bind(adminId,state,sourceChatId??null,sourceMessageId??null).run();
+}
+
+async function clearBroadcastSession(env:Env,adminId:number){
+  await ensureBroadcastStorage(env);
+  await env.DB.prepare(`DELETE FROM broadcast_sessions WHERE admin_telegram_id=?`).bind(adminId).run();
+}
+
+async function broadcastRecipientIds(env:Env,adminId:number):Promise<number[]>{
+  const ids=new Set<number>();
+  const rows=await env.DB.prepare(`SELECT telegram_id FROM employees WHERE active=1`).all();
+  for(const row of rows.results as any[]){
+    const id=Number(row.telegram_id);
+    if(Number.isFinite(id)&&id>0)ids.add(id);
+  }
+  for(const raw of (env.EMPLOYEE_IDS??'').split(',')){
+    const id=Number(raw.trim());
+    if(Number.isFinite(id)&&id>0)ids.add(id);
+  }
+  ids.delete(adminId);
+  return [...ids];
+}
+
+async function performBroadcast(env:Env,adminId:number,sourceChatId:number,sourceMessageId:number){
+  const recipients=await broadcastRecipientIds(env,adminId);
+  let sent=0,failed=0;
+  for(const chatId of recipients){
+    try{
+      await telegramCall(env,'copyMessage',{chat_id:chatId,from_chat_id:sourceChatId,message_id:sourceMessageId});
+      sent++;
+    }catch(e){
+      console.error('broadcast failed',chatId,e);
+      failed++;
+    }
+  }
+  return {total:recipients.length,sent,failed};
+}
 async function listObjects(env:Env){const r=await env.DB.prepare(`SELECT id,name,address,latitude,longitude FROM objects ORDER BY name COLLATE NOCASE`).all();return r.results as any[]}
 async function getReport(env:Env,id:number,u:TgUser){const r=await env.DB.prepare(`SELECT r.id,r.public_id,r.started_at,r.completed_at,r.status,o.id object_id,o.name object_name,o.address,e.telegram_id cleaner_id,e.first_name,e.last_name,e.username,(SELECT details FROM audit_log WHERE report_id=r.id AND action='report_meta' ORDER BY id DESC LIMIT 1) details FROM reports r JOIN objects o ON o.id=r.object_id JOIN employees e ON e.id=r.employee_id WHERE r.id=?`).bind(id).first<any>();if(!r)throw new Error("Отчёт не найден");if(!isAdmin(env,u.id)&&r.cleaner_id!==u.id)throw new Error("Нет доступа");const photos=await env.DB.prepare(`SELECT id,phase,telegram_file_id,created_at FROM report_photos WHERE report_id=? ORDER BY id`).bind(id).all();let meta:any={};try{meta=r.details?JSON.parse(r.details):{}}catch{}return {...r,cleaner_name:[r.first_name,r.last_name].filter(Boolean).join(" ")||r.username||String(r.cleaner_id),defects:meta.defects||"",expense_amount:meta.expense_amount??null,started_at_local:localDate(r.started_at),completed_at_local:localDate(r.completed_at),photos:photos.results};}
 async function sendPhotoToTelegram(env:Env,chatId:number,file:File){const fd=new FormData();fd.append("chat_id",String(chatId));fd.append("photo",file,file.name||"report.jpg");const r=await fetch(`${API}${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:"POST",body:fd});const j=await r.json() as any;if(!j.ok)throw new Error(j.description||"Не удалось загрузить фото в Telegram");const m=j.result;const p=m.photo?.[m.photo.length-1];try{await fetch(`${API}${env.TELEGRAM_BOT_TOKEN}/deleteMessage`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:chatId,message_id:m.message_id})})}catch{}return {file_id:p.file_id,file_unique_id:p.file_unique_id};}
@@ -71,5 +135,121 @@ if(url.pathname==="/api/admin/dashboard"&&req.method==='GET'){if(!isAdmin(env,u.
 return json({error:'Not found'},404);
 }catch(e){return json({error:(e as Error).message||'Ошибка'},400)}}
 async function telegramCall<T>(env:Env,method:string,payload:Record<string,unknown>):Promise<T>{const r=await fetch(`${API}${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const j=await r.json() as TgResult<T>;if(!j.ok)throw new Error(j.description||method);return j.result as T}
-async function bot(env:Env,update:TgUpdate,base:string){const m=update.message,c=update.callback_query;if(c){await telegramCall(env,'answerCallbackQuery',{callback_query_id:c.id});if(c.data==='admin'&&isAdmin(env,c.from.id))await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'Панель администратора теперь находится в приложении. Нажмите кнопку ниже.',reply_markup:{inline_keyboard:[[{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}]]}});return;}if(!m?.from||!isEmployee(env,m.from.id))return;if(m.text==='/start'||m.text==='/app'||m.text==='Меню'){await telegramCall(env,'sendMessage',{chat_id:m.chat.id,text:`<b>House Cleaning</b>\n\nВсе фотоотчёты теперь в удобном приложении.\nНажмите «Открыть приложение».`,parse_mode:'HTML',reply_markup:{inline_keyboard:[[ {text:'📱 Открыть приложение',web_app:{url:base+'/app'}} ], ...(isAdmin(env,m.from.id)?[[{text:'🛠 Панель администратора',callback_data:'admin'}]]:[]) ]}})}}
+async function bot(env:Env,update:TgUpdate,base:string){
+  const m=update.message,c=update.callback_query;
+
+  if(c){
+    if(c.data?.startsWith('broadcast_')){
+      if(!isAdmin(env,c.from.id)){
+        await telegramCall(env,'answerCallbackQuery',{callback_query_id:c.id,text:'Нет доступа',show_alert:true});
+        return;
+      }
+      await telegramCall(env,'answerCallbackQuery',{callback_query_id:c.id});
+
+      if(c.data==='broadcast_new'){
+        await setBroadcastSession(env,c.from.id,'waiting_message');
+        const recipients=await broadcastRecipientIds(env,c.from.id);
+        await telegramCall(env,'sendMessage',{
+          chat_id:c.from.id,
+          text:`📣 <b>Новая рассылка</b>\n\nПолучателей сейчас: <b>${recipients.length}</b>\n\nОтправьте следующим сообщением то, что нужно разослать сотрудникам. Поддерживаются текст, фото, видео и документы.\n\nДля отмены: /cancel`,
+          parse_mode:'HTML'
+        });
+        return;
+      }
+
+      if(c.data==='broadcast_edit'){
+        await setBroadcastSession(env,c.from.id,'waiting_message');
+        await telegramCall(env,'sendMessage',{
+          chat_id:c.from.id,
+          text:'✏️ Отправьте новое сообщение для рассылки.\n\nДля отмены: /cancel'
+        });
+        return;
+      }
+
+      if(c.data==='broadcast_cancel'){
+        await clearBroadcastSession(env,c.from.id);
+        await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'Рассылка отменена.'});
+        return;
+      }
+
+      if(c.data==='broadcast_send'){
+        const s=await getBroadcastSession(env,c.from.id);
+        if(!s||s.state!=='waiting_confirm'||!s.source_chat_id||!s.source_message_id){
+          await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'Черновик рассылки не найден. Создайте новую рассылку.'});
+          return;
+        }
+        await setBroadcastSession(env,c.from.id,'sending',s.source_chat_id,s.source_message_id);
+        await telegramCall(env,'sendMessage',{chat_id:c.from.id,text:'📤 Начинаю рассылку…'});
+        const result=await performBroadcast(env,c.from.id,Number(s.source_chat_id),Number(s.source_message_id));
+        await clearBroadcastSession(env,c.from.id);
+        await telegramCall(env,'sendMessage',{
+          chat_id:c.from.id,
+          text:`✅ <b>Рассылка завершена</b>\n\nПолучателей: <b>${result.total}</b>\nДоставлено: <b>${result.sent}</b>\nОшибок: <b>${result.failed}</b>`,
+          parse_mode:'HTML'
+        });
+        return;
+      }
+    }
+
+    await telegramCall(env,'answerCallbackQuery',{callback_query_id:c.id});
+    if(c.data==='admin'&&isAdmin(env,c.from.id)){
+      await telegramCall(env,'sendMessage',{
+        chat_id:c.from.id,
+        text:'Панель администратора находится в приложении. Нажмите кнопку ниже.',
+        reply_markup:{inline_keyboard:[[{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}]]}
+      });
+    }
+    return;
+  }
+
+  if(!m?.from||!isEmployee(env,m.from.id))return;
+  await ensureEmployee(env,m.from);
+  const admin=isAdmin(env,m.from.id);
+
+  if(admin&&m.text==='/cancel'){
+    await clearBroadcastSession(env,m.from.id);
+    await telegramCall(env,'sendMessage',{chat_id:m.chat.id,text:'Рассылка отменена.'});
+    return;
+  }
+
+  if(m.text==='/start'||m.text==='/app'||m.text==='Меню'){
+    await telegramCall(env,'sendMessage',{
+      chat_id:m.chat.id,
+      text:`<b>House Cleaning</b>\n\nВсе фотоотчёты теперь в удобном приложении.\nНажмите «Открыть приложение».`,
+      parse_mode:'HTML',
+      reply_markup:{inline_keyboard:[
+        [{text:'📱 Открыть приложение',web_app:{url:base+'/app'}}],
+        ...(admin?[
+          [{text:'🛠 Панель администратора',callback_data:'admin'}],
+          [{text:'📣 Рассылка',callback_data:'broadcast_new'}]
+        ]:[])
+      ]}
+    });
+    return;
+  }
+
+  if(admin){
+    const s=await getBroadcastSession(env,m.from.id);
+    if(s?.state==='waiting_message'){
+      const recipients=await broadcastRecipientIds(env,m.from.id);
+      await setBroadcastSession(env,m.from.id,'waiting_confirm',m.chat.id,m.message_id);
+      await telegramCall(env,'sendMessage',{
+        chat_id:m.chat.id,
+        text:`Проверьте сообщение выше. Отправить его всем пользователям?\n\nПолучателей: <b>${recipients.length}</b>`,
+        parse_mode:'HTML',
+        reply_markup:{inline_keyboard:[
+          [{text:'✅ Отправить всем',callback_data:'broadcast_send'}],
+          [{text:'✏️ Изменить',callback_data:'broadcast_edit'},{text:'❌ Отмена',callback_data:'broadcast_cancel'}]
+        ]}
+      });
+      return;
+    }
+    if(s?.state==='waiting_confirm'){
+      await telegramCall(env,'sendMessage',{
+        chat_id:m.chat.id,
+        text:'Черновик уже готов. Нажмите «Отправить всем», «Изменить» или «Отмена» под сообщением подтверждения.'
+      });
+    }
+  }
+}
 export default {async fetch(req:Request,env:Env):Promise<Response>{const url=new URL(req.url);if(url.pathname==='/health')return json({ok:true,service:'hcotcet',app:'/app'});if(url.pathname==='/app'&&req.method==='GET')return html();if(url.pathname.startsWith('/api/'))return apiHandler(req,env);if(url.pathname==='/webhook'&&req.method==='POST'){if(env.TELEGRAM_WEBHOOK_SECRET&&req.headers.get('x-telegram-bot-api-secret-token')!==env.TELEGRAM_WEBHOOK_SECRET)return new Response('Unauthorized',{status:401});const update=await req.json() as TgUpdate;try{await bot(env,update,`${url.origin}`)}catch(e){console.error(e)}return new Response('OK')}return new Response('Not found',{status:404})}};

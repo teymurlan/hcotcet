@@ -1,0 +1,33 @@
+name: Export production worker
+
+on:
+  push:
+    branches:
+      - ops/export-production
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download production Worker bundle
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -D production-headers.txt \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/hcbototcet/content" \
+            -o production-worker-content.bin
+          wc -c production-worker-content.bin
+          sed -n '1,30p' production-headers.txt
+
+      - name: Upload production bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-worker-export
+          path: |
+            production-worker-content.bin
+            production-headers.txt
+          retention-days: 1

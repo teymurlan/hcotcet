@@ -18,7 +18,7 @@ jobs:
           curl --fail-with-body --silent --show-error \
             -D production-headers.txt \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/hcbototcet/content" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/hcbototcet/content/v2" \
             -o production-worker-content.bin
           wc -c production-worker-content.bin
           sed -n '1,30p' production-headers.txt
